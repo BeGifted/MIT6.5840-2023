@@ -365,7 +365,7 @@ func (rf *Raft) heartBeat() {
 					rf.mu.Lock()
 					o = ok
 
-					if rf.state != Leader || args.Term != reply.Term || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
+					if rf.state != Leader || args.Term != rf.currentTerm {
 						rf.mu.Unlock()
 						return
 					}
@@ -439,7 +439,7 @@ func (rf *Raft) ticker() {
 						reply := RequestVoteReply{}
 						if ok := rf.sendRequestVote(i, &args, &reply); ok {
 							rf.mu.Lock()
-							if rf.state != Candidate || args.Term != reply.Term || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
+							if rf.state != Candidate || args.Term != rf.currentTerm {
 								rf.mu.Unlock()
 								return
 							}
