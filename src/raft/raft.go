@@ -449,8 +449,24 @@ func (rf *Raft) replicateLog() {
 						rf.commit() // update commitIndex
 						return
 					} else {
-						if args.PrevLogIndex > 0 {
-							rf.nextIndex[i] = args.PrevLogIndex
+						// if args.PrevLogIndex > 0 {
+						// 	rf.nextIndex[i] = args.PrevLogIndex
+						// }
+						if reply.ConflictTerm >= 0 {
+							lastIndex := -1
+							for i := len(rf.log) - 1; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									lastIndex = i
+									break
+								}
+							}
+							if lastIndex >= 0 {
+								rf.nextIndex[i] = lastIndex + 1
+							} else {
+								rf.nextIndex[i] = reply.ConflictIndex
+							}
+						} else {
+							rf.nextIndex[i] = reply.ConflictIndex
 						}
 						args.PrevLogIndex = rf.nextIndex[i] - 1
 						args.PrevLogTerm = rf.log[rf.nextIndex[i]-1].Term
