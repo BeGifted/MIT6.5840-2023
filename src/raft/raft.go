@@ -188,10 +188,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term         int // currentTerm
-	Success      bool
-	ConfictIndex int
-	ConfictTerm  int
+	Term          int // currentTerm
+	Success       bool
+	ConflictIndex int
+	ConflictTerm  int
 }
 
 // example RequestVote RPC handler.
@@ -210,10 +210,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	} else if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogTerm >= rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
+		(args.LastLogTerm > rf.log[len(rf.log)-1].Term || (args.LastLogTerm == rf.log[len(rf.log)-1].Term && args.LastLogIndex >= len(rf.log)-1)) {
 		reply.VoteGranted = true
 		reply.Term = rf.currentTerm
 		rf.votedFor = args.CandidateId
+		timeout := time.Duration(250+rand.Intn(300)) * time.Millisecond
+		rf.expiryTime = time.Now().Add(timeout)
+		rf.persist()
 	} else {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -244,14 +247,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.expiryTime = time.Now().Add(timeout)
 
 		if args.PrevLogIndex > len(rf.log)-1 {
-			reply.ConfictIndex = len(rf.log)
-			reply.ConfictTerm = -1
+			reply.ConflictIndex = len(rf.log)
+			reply.ConflictTerm = -1
 		} else {
-			reply.ConfictTerm = rf.log[args.PrevLogIndex].Term
-			reply.ConfictIndex = 1
+			reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+			reply.ConflictIndex = 1
 			for i := args.PrevLogIndex - 1; i >= 0; i-- {
-				if rf.log[i].Term != reply.ConfictTerm {
-					reply.ConfictIndex += i
+				if rf.log[i].Term != reply.ConflictTerm {
+					reply.ConflictIndex += i
+					break
 				}
 			}
 
@@ -396,13 +400,24 @@ func (rf *Raft) replicateLog() {
 				rf.mu.Unlock()
 				return
 			}
+
+			var copylog []Entry
+			if rf.nextIndex[i] >= len(rf.log) {
+				copylog = rf.log[len(rf.log):]
+			} else {
+				copylog = rf.log[rf.nextIndex[i]:]
+			}
+			prevLogIndex := rf.nextIndex[i] - 1
+			if prevLogIndex > len(rf.log)-1 {
+				prevLogIndex = len(rf.log) - 1
+			}
 			// log.Println(i, "rf.nextIndex[i]", rf.nextIndex[i], "len", len(rf.log))
 			args := AppendEntriesArgs{
 				Term:         rf.currentTerm,
 				LeaderId:     rf.me,
-				PrevLogIndex: rf.nextIndex[i] - 1,
-				PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-				Entries:      rf.log[rf.nextIndex[i]:],
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  rf.log[prevLogIndex].Term,
+				Entries:      copylog,
 				LeaderCommit: rf.commitIndex,
 			}
 			reply := AppendEntriesReply{}
@@ -413,7 +428,7 @@ func (rf *Raft) replicateLog() {
 					rf.mu.Lock()
 					log.Println("replicateLog", rf.me, "send AppendEntries to", i, ": currentTerm=", rf.currentTerm, "reply.Term=", reply.Term, "reply.Success", reply.Success)
 
-					if rf.state != Leader || args.Term != rf.currentTerm {
+					if rf.state != Leader || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
 						rf.mu.Unlock()
 						return
 					}
@@ -444,7 +459,7 @@ func (rf *Raft) replicateLog() {
 					rf.mu.Unlock()
 				}
 
-				time.Sleep(time.Duration(50) * time.Millisecond)
+				time.Sleep(time.Duration(60) * time.Millisecond)
 			}
 		}(i)
 
@@ -489,12 +504,23 @@ func (rf *Raft) heartBeat() {
 					return
 				}
 				// log.Println(i, "rf.nextIndex[i]", rf.nextIndex[i], "len", len(rf.log))
+				var copylog []Entry
+				if rf.nextIndex[i] >= len(rf.log) {
+					copylog = rf.log[len(rf.log):]
+				} else {
+					copylog = rf.log[rf.nextIndex[i]:]
+				}
+				prevLogIndex := rf.nextIndex[i] - 1
+				if prevLogIndex > len(rf.log)-1 {
+					prevLogIndex = len(rf.log) - 1
+				}
+
 				args := AppendEntriesArgs{
 					Term:         rf.currentTerm,
 					LeaderId:     rf.me,
-					PrevLogIndex: rf.nextIndex[i] - 1,
-					PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-					Entries:      rf.log[rf.nextIndex[i]:],
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  rf.log[prevLogIndex].Term,
+					Entries:      copylog,
 					LeaderCommit: rf.commitIndex,
 				}
 				reply := AppendEntriesReply{}
@@ -503,7 +529,7 @@ func (rf *Raft) heartBeat() {
 					rf.mu.Lock()
 					log.Println("heartBeat", rf.me, "send AppendEntries to", i, ": currentTerm=", rf.currentTerm, "reply.Term=", reply.Term, "reply.Success", reply.Success)
 
-					if rf.state != Leader || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
+					if rf.state != Leader || args.Term != rf.currentTerm || reply.Term < rf.currentTerm || rf.killed() {
 						rf.mu.Unlock()
 						return
 					}
@@ -525,15 +551,31 @@ func (rf *Raft) heartBeat() {
 						rf.mu.Unlock()
 						rf.commit() // update commitIndex
 					} else {
-						if args.PrevLogIndex > 0 {
-							rf.nextIndex[i] = args.PrevLogIndex
+						// if args.PrevLogIndex > 0 {
+						// 	rf.nextIndex[i] = args.PrevLogIndex
+						// }
+						if reply.ConflictTerm >= 0 {
+							lastIndex := -1
+							for i := len(rf.log) - 1; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									lastIndex = i
+									break
+								}
+							}
+							if lastIndex >= 0 {
+								rf.nextIndex[i] = lastIndex + 1
+							} else {
+								rf.nextIndex[i] = reply.ConflictIndex
+							}
+						} else {
+							rf.nextIndex[i] = reply.ConflictIndex
 						}
 						rf.mu.Unlock()
 					}
 				}
 			}(i)
 		}
-		time.Sleep(time.Duration(50) * time.Millisecond)
+		time.Sleep(time.Duration(70) * time.Millisecond)
 	}
 }
 
@@ -587,7 +629,7 @@ func (rf *Raft) ticker() {
 
 							log.Println("requestVote", rf.me, "send RequestVote to", i, ": currentTerm=", rf.currentTerm, "reply.Term=", reply.Term, "reply.VoteGranted", reply.VoteGranted)
 
-							if rf.state != Candidate || args.Term != rf.currentTerm || reply.Term < rf.currentTerm {
+							if rf.state != Candidate || args.Term != rf.currentTerm || reply.Term < rf.currentTerm || rf.killed() {
 								rf.mu.Unlock()
 								return
 							}
@@ -615,7 +657,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 30)
+		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -649,7 +691,7 @@ func (rf *Raft) apply() {
 		// }
 		rf.mu.Unlock()
 
-		time.Sleep(time.Duration(10) * time.Millisecond)
+		time.Sleep(time.Duration(50) * time.Millisecond)
 	}
 }
 
