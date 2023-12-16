@@ -10,9 +10,9 @@
 
 ✅Lab2D
 
-☑️Lab3A
+✅Lab3A
 
-☑️Lab3B
+✅Lab3B
 
 ☑️Lab4A
 
