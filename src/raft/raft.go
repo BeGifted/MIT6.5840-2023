@@ -535,6 +535,10 @@ func (rf *Raft) replicateLog() {
 			for { // fail then retry
 				rf.mu.Lock()
 				// InstallSnapshot begin
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					return
+				}
 				lastIncludedIndex := rf.getFirstIndex()
 				if rf.nextIndex[i] <= lastIncludedIndex {
 					args := InstallSnapshotArgs{
@@ -627,7 +631,7 @@ func (rf *Raft) replicateLog() {
 					}
 
 					if reply.Success {
-						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+						rf.matchIndex[i] = int(math.Max(float64(rf.matchIndex[i]), float64(args.PrevLogIndex+len(args.Entries))))
 						rf.nextIndex[i] = rf.matchIndex[i] + 1
 						rf.commit() // update commitIndex
 						rf.mu.Unlock()
@@ -661,7 +665,7 @@ func (rf *Raft) replicateLog() {
 					rf.mu.Unlock()
 				}
 
-				time.Sleep(time.Duration(100) * time.Millisecond)
+				time.Sleep(time.Duration(60) * time.Millisecond)
 			}
 		}(i)
 
@@ -792,7 +796,7 @@ func (rf *Raft) heartBeat() {
 					}
 
 					if reply.Success {
-						rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+						rf.matchIndex[i] = int(math.Max(float64(rf.matchIndex[i]), float64(args.PrevLogIndex+len(args.Entries))))
 						rf.nextIndex[i] = rf.matchIndex[i] + 1
 						rf.commit() // update commitIndex
 						rf.mu.Unlock()
@@ -904,7 +908,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 30)
+		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }

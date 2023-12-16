@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,9 @@ type KVServer struct {
 	waitCh  map[int]chan *Op
 	lastReq map[int64]int64
 	timeout time.Duration
+
+	persister         *raft.Persister
+	lastIncludedIndex int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -161,6 +165,11 @@ func (kv *KVServer) apply() {
 		applyMsg := <-kv.applyCh
 		kv.mu.Lock()
 		if applyMsg.CommandValid {
+			if applyMsg.CommandIndex <= kv.lastIncludedIndex {
+				kv.mu.Unlock()
+				continue
+			}
+
 			if op, ok := applyMsg.Command.(Op); ok {
 				log.Println("exec command")
 				kv.exec(&op)
@@ -170,9 +179,25 @@ func (kv *KVServer) apply() {
 						waitCh <- &op
 					}
 				}
+
+				if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+					w := new(bytes.Buffer)
+					e := labgob.NewEncoder(w)
+					e.Encode(kv.kvs)
+					e.Encode(kv.lastReq)
+					kvstate := w.Bytes()
+					kv.rf.Snapshot(applyMsg.CommandIndex, kvstate)
+				}
+				kv.lastIncludedIndex = applyMsg.CommandIndex
 			}
 		} else if applyMsg.SnapshotValid {
+			if applyMsg.SnapshotIndex <= kv.lastIncludedIndex {
+				kv.mu.Unlock()
+				continue
+			}
 
+			kv.readPersist(applyMsg.Snapshot)
+			kv.lastIncludedIndex = applyMsg.SnapshotIndex
 		}
 		kv.mu.Unlock()
 	}
@@ -209,6 +234,25 @@ func (kv *KVServer) isInvalidReq(clientId int64, reqId int64) bool {
 	return false
 }
 
+func (kv *KVServer) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var kvs map[string]string
+	var lastReq map[int64]int64
+	if d.Decode(&kvs) != nil ||
+		d.Decode(&lastReq) != nil {
+		log.Println("decode fail")
+	} else {
+		kv.kvs = kvs
+		kv.lastReq = lastReq
+		log.Println("restore success")
+	}
+}
+
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
@@ -240,6 +284,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.waitCh = make(map[int]chan *Op)
 	kv.lastReq = make(map[int64]int64)
 	kv.timeout = 500 * time.Millisecond
+
+	kv.persister = persister
+	kv.readPersist(kv.persister.ReadSnapshot())
 
 	go kv.apply()
 
