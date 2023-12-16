@@ -46,6 +46,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -660,7 +661,7 @@ func (rf *Raft) replicateLog() {
 					rf.mu.Unlock()
 				}
 
-				time.Sleep(time.Duration(60) * time.Millisecond)
+				time.Sleep(time.Duration(100) * time.Millisecond)
 			}
 		}(i)
 
@@ -903,7 +904,7 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
+		ms := 50 + (rand.Int63() % 30)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
@@ -923,6 +924,7 @@ func (rf *Raft) apply() {
 					CommandValid: true,
 					Command:      entry.Command,
 					CommandIndex: entry.Index,
+					CommandTerm:  entry.Term,
 				}
 			}
 			continue
@@ -939,7 +941,7 @@ func (rf *Raft) apply() {
 		// }
 		rf.mu.Unlock()
 
-		time.Sleep(time.Duration(50) * time.Millisecond)
+		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
