@@ -378,7 +378,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 
 	if args.Term > rf.currentTerm { // all server
 		rf.state = Follower
@@ -390,12 +389,14 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
 		return
 	}
 
 	rf.resetTimeout()
 	reply.Term = rf.currentTerm
 	if rf.commitIndex >= args.LastIncludedIndex { // snapshot timeout
+		rf.mu.Unlock()
 		return
 	}
 
@@ -417,6 +418,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persister.Save(raftstate, args.Data)
 
 	rf.lastApplied, rf.commitIndex = args.LastIncludedIndex, args.LastIncludedIndex
+	rf.mu.Unlock()
 	rf.applyCh <- ApplyMsg{
 		SnapshotValid: true,
 		Snapshot:      args.Data,
